@@ -108,6 +108,7 @@
                 <video id="local-video" style="background-color: black;" width="320" height="240"></video>
                 <strong class="d-block">Local logs:</strong>
                 <div id="local-logs" class="mt-2 d-block" style="background-color: #f8f9fa;"></div>
+                <button type="button" class="btn btn-primary" onclick="remove_track()">remove track</button>
             </div>
             <div class="col-6 pt-2">
                 <span style="position: absolute;margin-left: 5px;margin-top: 5px;"
@@ -167,6 +168,8 @@
         const socket = new WebSocket("ws://localhost:7000/ws");
         const echoSocket = new WebSocket("ws://localhost:7000/ws");
         const pc = new RTCPeerConnection(config)
+        let transciever = null
+
         const epc = new RTCPeerConnection(config)
 
         socket.addEventListener('message', async (event) => {
@@ -189,6 +192,7 @@
                 pc.addIceCandidate(resp.params).catch(log);
             }
         })
+
 
         pc.oniceconnectionstatechange = () => log(`ICE connection state: ${pc.iceConnectionState}`)
 
@@ -301,7 +305,7 @@
 
                 log("Publishing stream")
                 if (simulcast) {
-                    pc.addTransceiver(localStream.getVideoTracks()[0], {
+                    transciever = pc.addTransceiver(localStream.getVideoTracks()[0], {
                         streams: [localStream],
                         direction: 'sendonly',
                         sendEncodings: [{
@@ -322,12 +326,17 @@
                     });
                     pc.addTrack(stream.getAudioTracks()[0], localStream)
                 } else {
-                    localStream.getTracks().forEach((track) => {
-                        pc.addTrack(track, localStream);
-                    });
+                    transciever = pc.addTransceiver(localStream.getVideoTracks()[0], {
+                        streams: [localStream],
+                        direction: 'sendonly'
+                    })
                 }
                 join()
             }).catch(log)
+        }
+
+        const remove_track = () => {
+            pc.removeTrack(transciever.sender)
         }
 
         let localStream
@@ -416,6 +425,7 @@
             if (remoteStream === undefined) {
                 getStats()
                 remoteStream = streams[0]
+                remoteStream.onremovetrack = () => {echoLog("remoteStream.onremovetrack()")}
                 remoteVideo.srcObject = remoteStream
                 remoteVideo.autoplay = true
                 api.streamId = remoteStream.id
