@@ -203,7 +203,7 @@ func (r *router) addSender(p *WebRTCTransport, rr *receiverRouter) error {
 	// Create webrtc sender for the peer we are sending track to
 	var t *webrtc.RTPTransceiver
 	for _, tr := range p.pc.GetTransceivers() {
-		if tr.Direction() == webrtc.RTPTransceiverDirectionInactive {
+		if tr.Direction() == webrtc.RTPTransceiverDirectionInactive || tr.Direction() == webrtc.RTPTransceiverDirectionRecvonly {
 			t = tr
 			break
 		}
