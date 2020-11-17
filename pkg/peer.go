@@ -41,6 +41,7 @@ type Peer struct {
 	subscriber *Subscriber
 
 	OnOffer                    func(*webrtc.SessionDescription)
+	OnNegotiationNeeded                    func(*webrtc.SessionDescription)
 	OnIceCandidate             func(*webrtc.ICECandidateInit, int)
 	OnICEConnectionStateChange func(webrtc.ICEConnectionState)
 
@@ -53,6 +54,83 @@ func NewPeer(provider TransportProvider) *Peer {
 	return &Peer{
 		provider: provider,
 	}
+}
+
+func (p *Peer) CreateOffer(sid string) (*webrtc.SessionDescription, error) {
+	if p.publisher != nil {
+		log.Debugf("peer already exists")
+		return nil, ErrTransportExists
+	}
+	p.Lock()
+	defer p.Unlock()
+
+	me := MediaEngine{}
+	me.RegisterDefaultCodecs()
+
+	pid := cuid.New()
+	p.id = pid
+
+	var err error
+	p.session, p.publisher, p.subscriber, err = p.provider.NewTransport(sid, pid, me)
+	if err != nil {
+		return nil, fmt.Errorf("error creating transport: %v", err)
+	}
+
+	p.session.AddPeer(p)
+
+	log.Infof("peer %s join session %s", p.id, sid)
+
+	offer, err := p.subscriber.CreateOffer()
+	if err != nil {
+		return nil, err
+	}
+
+	p.subscriber.OnICECandidate(func(c *webrtc.ICECandidate) {
+		log.Debugf("on ice candidate called")
+		if c == nil {
+			return
+		}
+
+		if p.OnIceCandidate != nil {
+			json := c.ToJSON()
+			p.OnIceCandidate(&json, subscriber)
+		}
+	})
+
+	p.publisher.OnICECandidate(func(c *webrtc.ICECandidate) {
+		log.Debugf("on ice candidate called")
+		if c == nil {
+			return
+		}
+
+		if p.OnIceCandidate != nil {
+			json := c.ToJSON()
+			p.OnIceCandidate(&json, publisher)
+		}
+	})
+
+	p.publisher.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
+		if p.OnICEConnectionStateChange != nil {
+			p.OnICEConnectionStateChange(s)
+		}
+	})
+
+	p.subscriber.OnNegotiationNeeded(func() {
+		p.Lock()
+		defer p.Unlock()
+
+		offer, err := p.subscriber.CreateOffer()
+		if err != nil {
+			log.Errorf("CreateOffer error: %v", err)
+			return
+		}
+
+		if p.OnNegotiationNeeded != nil {
+			p.OnNegotiationNeeded(&offer)
+		}
+	})
+
+	return &offer, nil
 }
 
 // Join initializes this peer for a given sessionID (takes an SDPOffer)
