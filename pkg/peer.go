@@ -133,6 +133,10 @@ func (p *Peer) CreateOffer(sid string) (*webrtc.SessionDescription, error) {
 	return &offer, nil
 }
 
+func (p *Peer) OnTrackHandler(f func(*webrtc.Track, *webrtc.RTPReceiver)) {
+	p.publisher.onTrackHandler = f
+}
+
 // Join initializes this peer for a given sessionID (takes an SDPOffer)
 func (p *Peer) Join(sid string, sdp webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
 	if p.publisher != nil {

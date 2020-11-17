@@ -26,7 +26,6 @@ type Subscriber struct {
 	senders    map[string][]Sender
 	candidates []webrtc.ICECandidateInit
 
-	onTrackHandler func(*webrtc.Track, *webrtc.RTPReceiver)
 	pendingSenders deque.Deque
 	negotiate      func()
 
