@@ -16,7 +16,7 @@ require (
 	github.com/pion/rtp v1.6.1
 	github.com/pion/sdp/v3 v3.0.3
 	github.com/pion/webrtc/v3 v3.0.0-beta.15.0.20201209023348-63401a8837fb
-	github.com/prometheus/client_golang v1.8.0
+	github.com/prometheus/client_golang v1.9.0
 	github.com/rs/cors v1.7.0 // indirect
 	github.com/soheilhy/cmux v0.1.4
 	github.com/sourcegraph/jsonrpc2 v0.0.0-20200429184054-15c2290dcb37
@@ -25,7 +25,6 @@ require (
 	golang.org/x/crypto v0.0.0-20201208171446-5f87f3452ae9 // indirect
 	golang.org/x/net v0.0.0-20201207224615-747e23833adb // indirect
 	golang.org/x/sync v0.0.0-20200625203802-6e8e738ad208
-	golang.org/x/sys v0.0.0-20201207223542-d4d67f95c62d // indirect
 	google.golang.org/grpc v1.33.2
 	google.golang.org/grpc/examples v0.0.0-20201209011439-fd32f6a4fefe // indirect
 	google.golang.org/protobuf v1.25.0
