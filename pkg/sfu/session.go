@@ -2,8 +2,9 @@ package sfu
 
 import (
 	"sync"
-
+	"fmt"
 	log "github.com/pion/ion-log"
+	"github.com/pion/ion-sfu/pkg/dcplug"
 	"github.com/pion/webrtc/v3"
 )
 
@@ -15,6 +16,7 @@ type Session struct {
 	peers          map[string]*Peer
 	onCloseHandler func()
 	closed         bool
+	dcplugs        map[string]*dcplug.DCPluginHost
 }
 
 // NewSession creates a new session
@@ -33,10 +35,55 @@ func (s *Session) AddPeer(peer *Peer) {
 	s.mu.Unlock()
 }
 
+func (s *Session) AddPluginChannels( peer *Peer ) {
+	addedChannels := false
+	for label,plug := range s.dcplugs {
+		log.Infof("Trying to add %v", label)
+		n, err := peer.subscriber.AddDataChannel(label)
+
+		if err != nil {
+			log.Errorf("error adding datachannel: %s", err)
+			continue
+		}
+		addedChannels = true
+		pid := peer.id
+		sid := s.id
+		log.Infof("Trying to add %v subscriber", label)
+		plug.AddSubscriber(sid, pid, func(msg webrtc.DataChannelMessage) error {
+			if n.ReadyState() == webrtc.DataChannelStateOpen {
+				if msg.IsString {
+					if err := n.SendText(string(msg.Data)); err != nil {
+						log.Errorf("Sending dc message err: %v", err)
+						return fmt.Errorf("Sending dc message err: %v", err)
+					}
+				} else {
+					if err := n.Send(msg.Data); err != nil {
+						log.Errorf("Sending dc message err: %v", err)
+						return fmt.Errorf("Sending dc message err: %v", err)
+					}
+				}
+			}
+			return nil
+		})
+		log.Infof("Trying to add %v message", label)
+		n.OnMessage(func(msg webrtc.DataChannelMessage) {
+			plug.ProcessMessage(sid, pid, msg)
+		})
+
+	}
+	if addedChannels {
+		log.Infof("Trying to negotiate")
+		peer.subscriber.negotiate()
+	}
+}
+
 // RemovePeer removes a transport from the session
 func (s *Session) RemovePeer(pid string) {
 	s.mu.Lock()
 	log.Infof("RemovePeer %s from session %s", pid, s.id)
+	for _,plug := range s.dcplugs {
+		plug.RemoveSubscriber(s.id, pid)
+	}
 	delete(s.peers, pid)
 	s.mu.Unlock()
 
@@ -129,6 +176,8 @@ func (s *Session) Subscribe(peer *Peer) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	s.AddPluginChannels(peer)
+
 	subdChans := false
 	for pid, p := range s.peers {
 		if pid == peer.id {
@@ -143,6 +192,9 @@ func (s *Session) Subscribe(peer *Peer) {
 		if !subdChans {
 			for _, dc := range p.subscriber.channels {
 				label := dc.Label()
+				if _,ok := s.dcplugs[label] ; ok {
+					continue
+				}
 				n, err := peer.subscriber.AddDataChannel(label)
 
 				if err != nil {

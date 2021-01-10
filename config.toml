@@ -6,6 +6,10 @@ ballast = 0
 # enable prometheus sfu statistics
 withstats = false
 
+[[sfu.dcplugins]]
+path = "bin/example_dcplug.so"
+label = "example"
+
 [router]
 # Limit the remb bandwidth in kbps
 # zero means no limits

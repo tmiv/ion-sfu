@@ -9,6 +9,7 @@ import (
 	log "github.com/pion/ion-log"
 	"github.com/pion/ion-sfu/pkg/buffer"
 	"github.com/pion/ion-sfu/pkg/stats"
+	"github.com/pion/ion-sfu/pkg/dcplug"
 	"github.com/pion/turn/v2"
 	"github.com/pion/webrtc/v3"
 )
@@ -40,11 +41,17 @@ type WebRTCConfig struct {
 	SDPSemantics string            `mapstructure:"sdpsemantics"`
 }
 
+type DataChannelPluginConfig struct {
+	Path string  `mapstructure:"path"`
+	Label string `mapstructure:"label"`
+}
+
 // Config for base SFU
 type Config struct {
 	SFU struct {
 		Ballast   int64 `mapstructure:"ballast"`
 		WithStats bool  `mapstructure:"withstats"`
+	        DCPlugins   []DataChannelPluginConfig `mapstructure:"dcplugins"`
 	} `mapstructure:"sfu"`
 	WebRTC WebRTCConfig `mapstructure:"webrtc"`
 	Log    log.Config   `mapstructure:"log"`
@@ -64,6 +71,7 @@ type SFU struct {
 	router    RouterConfig
 	turn      *turn.Server
 	sessions  map[string]*Session
+	dcplugs   map[string]*dcplug.DCPluginHost
 	withStats bool
 }
 
@@ -129,6 +137,7 @@ func NewWebRTCTransportConfig(c Config) WebRTCTransportConfig {
 		stats.InitStats()
 	}
 
+
 	return w
 }
 
@@ -147,13 +156,17 @@ func NewSFU(c Config) *SFU {
 		},
 	}
 
+
 	w := NewWebRTCTransportConfig(c)
 
 	s := &SFU{
 		webrtc:    w,
 		sessions:  make(map[string]*Session),
+		dcplugs: make(map[string]*dcplug.DCPluginHost),
 		withStats: c.Router.WithStats,
 	}
+	// Init dc plugins
+	s.initDCPlugins( c.SFU.DCPlugins )
 
 	if c.Turn.Enabled {
 		ts, err := initTurnServer(c.Turn, nil)
@@ -167,6 +180,18 @@ func NewSFU(c Config) *SFU {
 	return s
 }
 
+func (s *SFU) initDCPlugins( plugin_configs []DataChannelPluginConfig ) {
+        for _, config := range plugin_configs {
+		p,err := dcplug.NewDCPluginHost(config.Path)
+		if err != nil {
+			log.Errorf(err.Error())
+		} else {
+		  s.dcplugs[config.Label] = p
+		  p.Launch()
+		}
+	}
+}
+
 // NewSession creates a new session instance
 func (s *SFU) newSession(id string) *Session {
 	session := NewSession(id)
@@ -176,6 +201,9 @@ func (s *SFU) newSession(id string) *Session {
 		delete(s.sessions, id)
 		s.Unlock()
 
+		for _, plug := range s.dcplugs {
+			plug.EndSession(id)
+		}
 		if s.withStats {
 			stats.Sessions.Dec()
 		}
@@ -185,6 +213,10 @@ func (s *SFU) newSession(id string) *Session {
 	s.sessions[id] = session
 	s.Unlock()
 
+	session.dcplugs = s.dcplugs
+        for _, plug := range s.dcplugs {
+		plug.StartSession(id)
+	}
 	if s.withStats {
 		stats.Sessions.Inc()
 	}

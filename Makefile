@@ -26,3 +26,6 @@ test: go_init
 		-timeout 120s \
 		-coverprofile=cover.out -covermode=atomic \
 		-v -race ${GO_TESTPKGS} 
+
+example_dcplug: go_init
+	go build -o bin/example_dcplug.so $(GO_LDFLAGS) -buildmode=plugin ./plug/example_dcplug.go
