@@ -1,18 +1,18 @@
 package sfu
 
 import (
+	"context"
 	"io"
-	"math"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/pion/rtcp"
 
 	"github.com/bep/debounce"
 	log "github.com/pion/ion-log"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v3"
 )
+
+const APIChannelLabel = "ion-sfu"
 
 type Subscriber struct {
 	sync.RWMutex
@@ -53,13 +53,6 @@ func NewSubscriber(id string, cfg WebRTCTransportConfig) (*Subscriber, error) {
 		channels: make(map[string]*webrtc.DataChannel),
 	}
 
-	dc, err := pc.CreateDataChannel(apiChannelLabel, &webrtc.DataChannelInit{})
-	if err != nil {
-		log.Errorf("DC creation error: %v", err)
-		return nil, errPeerConnectionInitFailed
-	}
-	handleAPICommand(s, dc)
-
 	pc.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
 		log.Debugf("ice connection state: %s", connectionState)
 		switch connectionState {
@@ -78,6 +71,36 @@ func NewSubscriber(id string, cfg WebRTCTransportConfig) (*Subscriber, error) {
 	go s.downTracksReports()
 
 	return s, nil
+}
+
+func (s *Subscriber) AddDatachannel(peer *Peer, dc *Datachannel) error {
+	ndc, err := s.pc.CreateDataChannel(dc.Label, &webrtc.DataChannelInit{})
+	if err != nil {
+		return err
+	}
+
+	mws := newDCChain(dc.middlewares)
+	p := mws.Process(ProcessFunc(func(ctx context.Context, args ProcessArgs) {
+		if dc.onMessage != nil {
+			dc.onMessage(ctx, args, peer.session.getDataChannels(peer.id, dc.Label))
+		}
+	}))
+	ndc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		p.Process(context.Background(), ProcessArgs{
+			Peer:        peer,
+			Message:     msg,
+			DataChannel: ndc,
+		})
+	})
+
+	s.channels[dc.Label] = ndc
+
+	return nil
+}
+
+// DataChannel returns the channel for a label
+func (s *Subscriber) DataChannel(label string) *webrtc.DataChannel {
+	return s.channels[label]
 }
 
 func (s *Subscriber) OnNegotiationNeeded(f func()) {
@@ -126,6 +149,25 @@ func (s *Subscriber) AddDownTrack(streamID string, downTrack *DownTrack) {
 	}
 }
 
+func (s *Subscriber) RemoveDownTrack(streamID string, downTrack *DownTrack) {
+	s.Lock()
+	defer s.Unlock()
+	if dts, ok := s.tracks[streamID]; ok {
+		idx := -1
+		for i, dt := range dts {
+			if dt == downTrack {
+				idx = i
+			}
+		}
+		if idx >= 0 {
+			dts[idx] = dts[len(dts)-1]
+			dts[len(dts)-1] = nil
+			dts = dts[:len(dts)-1]
+			s.tracks[streamID] = dts
+		}
+	}
+}
+
 func (s *Subscriber) AddDataChannel(label string) (*webrtc.DataChannel, error) {
 	s.Lock()
 	defer s.Unlock()
@@ -153,7 +195,9 @@ func (s *Subscriber) SetRemoteDescription(desc webrtc.SessionDescription) error 
 	}
 
 	for _, c := range s.candidates {
-		s.pc.AddICECandidate(c)
+		if err := s.pc.AddICECandidate(c); err != nil {
+			log.Errorf("Add subscriber ice candidate to peer %s err: %v", s.id, err)
+		}
 	}
 	s.candidates = nil
 
@@ -175,6 +219,10 @@ func (s *Subscriber) downTracksReports() {
 	for {
 		time.Sleep(5 * time.Second)
 
+		if s.pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
+			return
+		}
+
 		var r []rtcp.Packet
 		var sd []rtcp.SourceDescriptionChunk
 		s.RLock()
@@ -183,44 +231,21 @@ func (s *Subscriber) downTracksReports() {
 				if !dt.bound.get() {
 					continue
 				}
-				now := time.Now().UnixNano()
-				nowNTP := timeToNtp(now)
-				lastPktMs := atomic.LoadInt64(&dt.lastPacketMs)
-				maxPktTs := atomic.LoadUint32(&dt.lastTS)
-				diffTs := uint32((now/1e6)-lastPktMs) * dt.codec.ClockRate / 1000
-				octets, packets := dt.getSRStats()
-				r = append(r, &rtcp.SenderReport{
-					SSRC:        dt.ssrc,
-					NTPTime:     nowNTP,
-					RTPTime:     maxPktTs + diffTs,
-					PacketCount: packets,
-					OctetCount:  octets,
-				})
-				sd = append(sd, rtcp.SourceDescriptionChunk{
-					Source: dt.ssrc,
-					Items: []rtcp.SourceDescriptionItem{{
-						Type: rtcp.SDESCNAME,
-						Text: dt.streamID,
-					}},
-				}, rtcp.SourceDescriptionChunk{
-					Source: dt.ssrc,
-					Items: []rtcp.SourceDescriptionItem{{
-						Type: rtcp.SDESType(15),
-						Text: dt.transceiver.Mid(),
-					}},
-				})
+				r = append(r, dt.CreateSenderReport())
+				sd = append(sd, dt.CreateSourceDescriptionChunks()...)
 			}
 		}
 		s.RUnlock()
-		i := math.Ceil(float64(len(sd)) / float64(20))
+		i := 0
 		j := 0
-		for i > 0 {
-			if i > 1 {
-				sd = sd[j*20 : (j+1)*20-1]
-			} else {
-				sd = sd[j*20 : cap(sd)]
+		for i < len(sd) {
+			i = (j + 1) * 15
+			if i >= len(sd) {
+				i = len(sd)
 			}
-			r = append(r, &rtcp.SourceDescription{Chunks: sd})
+			nsd := sd[j*15 : i]
+			r = append(r, &rtcp.SourceDescription{Chunks: nsd})
+			j++
 			if err := s.pc.WriteRTCP(r); err != nil {
 				if err == io.EOF || err == io.ErrClosedPipe {
 					return
@@ -228,8 +253,6 @@ func (s *Subscriber) downTracksReports() {
 				log.Errorf("Sending downtrack reports err: %v", err)
 			}
 			r = r[:0]
-			i--
-			j++
 		}
 	}
 }
@@ -244,19 +267,7 @@ func (s *Subscriber) sendStreamDownTracksReports(streamID string) {
 		if !dt.bound.get() {
 			continue
 		}
-		sd = append(sd, rtcp.SourceDescriptionChunk{
-			Source: dt.ssrc,
-			Items: []rtcp.SourceDescriptionItem{{
-				Type: rtcp.SDESCNAME,
-				Text: dt.streamID,
-			}},
-		}, rtcp.SourceDescriptionChunk{
-			Source: dt.ssrc,
-			Items: []rtcp.SourceDescriptionItem{{
-				Type: rtcp.SDESType(15),
-				Text: dt.transceiver.Mid(),
-			}},
-		})
+		sd = append(sd, dt.CreateSourceDescriptionChunks()...)
 	}
 	s.RUnlock()
 	r = append(r, &rtcp.SourceDescription{Chunks: sd})

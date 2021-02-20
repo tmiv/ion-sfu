@@ -4,27 +4,29 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 
-	_ "net/http/pprof"
-
 	"github.com/gorilla/websocket"
+	log "github.com/pion/ion-log"
+	"github.com/pion/ion-sfu/cmd/signal/json-rpc/server"
+	"github.com/pion/ion-sfu/pkg/middlewares/datachannel"
+	"github.com/pion/ion-sfu/pkg/sfu"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sourcegraph/jsonrpc2"
 	websocketjsonrpc2 "github.com/sourcegraph/jsonrpc2/websocket"
 	"github.com/spf13/viper"
-
-	log "github.com/pion/ion-log"
-	"github.com/pion/ion-sfu/cmd/signal/json-rpc/server"
-	"github.com/pion/ion-sfu/pkg/sfu"
 )
 
 var (
-	conf = sfu.Config{}
-	file string
-	cert string
-	key  string
-	addr string
+	conf        = sfu.Config{}
+	file        string
+	cert        string
+	key         string
+	addr        string
+	metricsAddr string
 )
 
 const (
@@ -79,6 +81,7 @@ func parse() bool {
 	flag.StringVar(&cert, "cert", "", "cert file")
 	flag.StringVar(&key, "key", "", "key file")
 	flag.StringVar(&addr, "a", ":7000", "address to use")
+	flag.StringVar(&metricsAddr, "m", ":8100", "merics to use")
 	help := flag.Bool("h", false, "help info")
 	flag.Parse()
 	if !load() {
@@ -89,6 +92,26 @@ func parse() bool {
 		return false
 	}
 	return true
+}
+
+func startMetrics(addr string) {
+	// start metrics server
+	m := http.NewServeMux()
+	m.Handle("/metrics", promhttp.Handler())
+	srv := &http.Server{
+		Handler: m,
+	}
+
+	metricsLis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Panicf("cannot bind to metrics endpoint %s. err: %s", addr, err)
+	}
+	log.Infof("Metrics Listening at %s", addr)
+
+	err = srv.Serve(metricsLis)
+	if err != nil {
+		log.Errorf("debug server stopped. got err: %s", err)
+	}
 }
 
 func main() {
@@ -102,7 +125,11 @@ func main() {
 	log.Init(conf.Log.Level, fixByFile, fixByFunc)
 
 	log.Infof("--- Starting SFU Node ---")
+
 	s := sfu.NewSFU(conf)
+	dc := s.NewDatachannel(sfu.APIChannelLabel)
+	dc.Use(datachannel.SubscriberAPI)
+
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true
@@ -124,6 +151,8 @@ func main() {
 		jc := jsonrpc2.NewConn(r.Context(), websocketjsonrpc2.NewObjectStream(c), p)
 		<-jc.DisconnectNotify()
 	}))
+
+	go startMetrics(metricsAddr)
 
 	var err error
 	if key != "" && cert != "" {

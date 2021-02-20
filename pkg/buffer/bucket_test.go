@@ -3,8 +3,6 @@ package buffer
 import (
 	"testing"
 
-	"github.com/pion/rtcp"
-
 	"github.com/stretchr/testify/assert"
 
 	"github.com/pion/rtp"
@@ -44,9 +42,7 @@ var TestPackets = []*rtp.Packet{
 }
 
 func Test_queue(t *testing.T) {
-	q := NewBucket(2*1000*1000, true)
-	q.onLost = func(_ []rtcp.NackPair, _ bool) {
-	}
+	q := NewBucket(make([]byte, 25000))
 
 	for _, p := range TestPackets {
 		p := p
@@ -100,11 +96,8 @@ func Test_queue_edges(t *testing.T) {
 			},
 		},
 	}
-	q := NewBucket(2*1000*1000, true)
-	q.onLost = func(_ []rtcp.NackPair, _ bool) {
-	}
+	q := NewBucket(make([]byte, 25000))
 	q.headSN = 65532
-	q.step = q.maxSteps - 2
 	for _, p := range TestPackets {
 		p := p
 		assert.NotNil(t, p)

@@ -20,13 +20,13 @@ func NewBufferFactory() *Factory {
 		videoPool: &sync.Pool{
 			New: func() interface{} {
 				// Make a 2MB buffer for video
-				return NewBucket(2*1000*1000, true)
+				return make([]byte, 2*1000*1000)
 			},
 		},
 		audioPool: &sync.Pool{
 			New: func() interface{} {
 				// Make a max 25 packets buffer for audio
-				return NewBucket(maxPktSize*25, false)
+				return make([]byte, maxPktSize*25)
 			},
 		},
 		rtpBuffers:  make(map[uint32]*Buffer),
@@ -70,6 +70,12 @@ func (f *Factory) GetBufferPair(ssrc uint32) (*Buffer, *RTCPReader) {
 	f.RLock()
 	defer f.RUnlock()
 	return f.rtpBuffers[ssrc], f.rtcpReaders[ssrc]
+}
+
+func (f *Factory) GetBuffer(ssrc uint32) *Buffer {
+	f.RLock()
+	defer f.RUnlock()
+	return f.rtpBuffers[ssrc]
 }
 
 func (f *Factory) GetRTCPReader(ssrc uint32) *RTCPReader {

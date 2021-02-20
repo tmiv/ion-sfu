@@ -6,11 +6,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pion/ion-sfu/pkg/buffer"
-
-	"github.com/pion/webrtc/v3"
-
+	"github.com/pion/ice/v2"
 	log "github.com/pion/ion-log"
+	"github.com/pion/ion-sfu/pkg/buffer"
+	"github.com/pion/ion-sfu/pkg/stats"
+	"github.com/pion/turn/v2"
+	"github.com/pion/webrtc/v3"
 )
 
 // ICEServerConfig defines parameters for ice servers
@@ -38,16 +39,19 @@ type WebRTCConfig struct {
 	ICEServers   []ICEServerConfig `mapstructure:"iceserver"`
 	Candidates   Candidates        `mapstructure:"candidates"`
 	SDPSemantics string            `mapstructure:"sdpsemantics"`
+	MDNS         bool              `mapstructure:"mdns"`
 }
 
 // Config for base SFU
 type Config struct {
 	SFU struct {
-		Ballast int64 `mapstructure:"ballast"`
+		Ballast   int64 `mapstructure:"ballast"`
+		WithStats bool  `mapstructure:"withstats"`
 	} `mapstructure:"sfu"`
 	WebRTC WebRTCConfig `mapstructure:"webrtc"`
 	Log    log.Config   `mapstructure:"log"`
 	Router RouterConfig `mapstructure:"router"`
+	Turn   TurnConfig   `mapstructure:"turn"`
 }
 
 var (
@@ -57,19 +61,25 @@ var (
 
 // SFU represents an sfu instance
 type SFU struct {
-	webrtc   WebRTCTransportConfig
-	router   RouterConfig
-	mu       sync.RWMutex
-	sessions map[string]*Session
+	sync.RWMutex
+	webrtc       WebRTCTransportConfig
+	turn         *turn.Server
+	sessions     map[string]*Session
+	datachannels []*Datachannel
+	withStats    bool
 }
 
 // NewWebRTCTransportConfig parses our settings and returns a usable WebRTCTransportConfig for creating PeerConnections
 func NewWebRTCTransportConfig(c Config) WebRTCTransportConfig {
 	se := webrtc.SettingEngine{}
+	se.DisableMediaEngineCopy(true)
 
 	var icePortStart, icePortEnd uint16
 
-	if len(c.WebRTC.ICEPortRange) == 2 {
+	if c.Turn.Enabled {
+		icePortStart = sfuMinPort
+		icePortEnd = sfuMaxPort
+	} else if len(c.WebRTC.ICEPortRange) == 2 {
 		icePortStart = c.WebRTC.ICEPortRange[0]
 		icePortEnd = c.WebRTC.ICEPortRange[1]
 	}
@@ -117,15 +127,19 @@ func NewWebRTCTransportConfig(c Config) WebRTCTransportConfig {
 		w.setting.SetNAT1To1IPs(c.WebRTC.Candidates.NAT1To1IPs, webrtc.ICECandidateTypeHost)
 	}
 
+	if !c.WebRTC.MDNS {
+		w.setting.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	}
+
+	if c.SFU.WithStats {
+		w.router.WithStats = true
+		stats.InitStats()
+	}
+
 	return w
 }
 
-// NewSFU creates a new sfu instance
-func NewSFU(c Config) *SFU {
-	// Init random seed
-	rand.Seed(time.Now().UnixNano())
-	// Init ballast
-	ballast := make([]byte, c.SFU.Ballast*1024*1024)
+func init() {
 	// Init buffer factory
 	bufferFactory = buffer.NewBufferFactory()
 	// Init packet factory
@@ -134,37 +148,64 @@ func NewSFU(c Config) *SFU {
 			return make([]byte, 1460)
 		},
 	}
+}
+
+// NewSFU creates a new sfu instance
+func NewSFU(c Config) *SFU {
+	// Init random seed
+	rand.Seed(time.Now().UnixNano())
+	// Init ballast
+	ballast := make([]byte, c.SFU.Ballast*1024*1024)
 
 	w := NewWebRTCTransportConfig(c)
 
-	s := &SFU{
-		webrtc:   w,
-		sessions: make(map[string]*Session),
+	sfu := &SFU{
+		webrtc:    w,
+		sessions:  make(map[string]*Session),
+		withStats: c.Router.WithStats,
+	}
+
+	if c.Turn.Enabled {
+		ts, err := InitTurnServer(c.Turn, nil)
+		if err != nil {
+			log.Panicf("Could not init turn server err: %v", err)
+		}
+		sfu.turn = ts
 	}
 
 	runtime.KeepAlive(ballast)
-	return s
+	return sfu
 }
 
 // NewSession creates a new session instance
 func (s *SFU) newSession(id string) *Session {
-	session := NewSession(id)
+	session := NewSession(id, s.datachannels, s.webrtc)
+
 	session.OnClose(func() {
-		s.mu.Lock()
+		s.Lock()
 		delete(s.sessions, id)
-		s.mu.Unlock()
+		s.Unlock()
+
+		if s.withStats {
+			stats.Sessions.Dec()
+		}
 	})
 
-	s.mu.Lock()
+	s.Lock()
 	s.sessions[id] = session
-	s.mu.Unlock()
+	s.Unlock()
+
+	if s.withStats {
+		stats.Sessions.Inc()
+	}
+
 	return session
 }
 
 // GetSession by id
 func (s *SFU) getSession(id string) *Session {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.RLock()
+	defer s.RUnlock()
 	return s.sessions[id]
 }
 
@@ -174,4 +215,17 @@ func (s *SFU) GetSession(sid string) (*Session, WebRTCTransportConfig) {
 		session = s.newSession(sid)
 	}
 	return session, s.webrtc
+}
+
+func (s *SFU) NewDatachannel(label string) *Datachannel {
+	dc := &Datachannel{Label: label}
+	s.datachannels = append(s.datachannels, dc)
+	return dc
+}
+
+// GetSessions return all sessions
+func (s *SFU) GetSessions() map[string]*Session {
+	s.RLock()
+	defer s.RUnlock()
+	return s.sessions
 }
